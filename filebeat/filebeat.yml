@@ -1,0 +1,32 @@
+# Step 1: read Docker's container logs, enrich them, print to stdout.
+# Kafka output replaces the console output in the next step.
+
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+
+processors:
+  # Attaches container name, image and labels — without this every line is
+  # anonymous and we can't tell nginx from postgres.
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+
+  # Filebeat reads its own container logs too, which with console output means
+  # it logs what it read, then reads what it logged.
+  - drop_event:
+      when:
+        equals:
+          container.name: "filebeat"
+
+  # Beat-internal fields we don't need downstream. container.labels is dropped
+  # because Docker Desktop attaches dozens of desktop_docker_io/* labels that
+  # would otherwise triple the size of every event.
+  - drop_fields:
+      fields: ["agent", "ecs", "input", "log.offset", "container.labels", "host"]
+      ignore_missing: true
+
+output.console:
+  pretty: false
+
+logging.level: info
