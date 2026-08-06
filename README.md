@@ -22,6 +22,16 @@ Logs from real containers and a synthetic generator ship through Kafka, get pars
 | UI | Kibana |
 | Alerting | Slack webhook, fired in-stream by the indexer |
 
+## Layout
+
+```
+docker-compose.yml   the whole stack — every component is a service here
+generator/           synthetic log source: JSON lines with trace IDs
+indexer/             Kafka consumer, parses and bulk-writes to ES  (not built)
+filebeat/            shipping config                               (not built)
+scripts/             dev helpers (traffic driver)
+```
+
 ## Design notes
 
 - **No API service.** Filebeat is the only ingress, Kibana the only read path.
