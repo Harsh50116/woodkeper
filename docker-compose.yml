@@ -1,0 +1,20 @@
+services:
+  nginx:
+    image: nginx
+    container_name: nginx
+    ports:
+      - "8080:80"
+
+  postgres:
+    image: postgres
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: pass
+    # Postgres logs almost nothing by default — these make it log every statement.
+    command:
+      - -c
+      - log_statement=all
+      - -c
+      - log_min_duration_statement=0
