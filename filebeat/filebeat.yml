@@ -1,5 +1,5 @@
-# Step 1: read Docker's container logs, enrich them, print to stdout.
-# Kafka output replaces the console output in the next step.
+# Reads Docker's container logs, enriches them with container metadata, and
+# ships them to Kafka. Parsing is deliberately left to the indexer.
 
 filebeat.inputs:
   - type: container
@@ -26,7 +26,18 @@ processors:
       fields: ["agent", "ecs", "input", "log.offset", "container.labels", "host"]
       ignore_missing: true
 
-output.console:
-  pretty: false
+output.kafka:
+  hosts: ["kafka:9092"]
+  topic: "logs"
+  # Keyed by container name, with Kafka hashing the key to pick a partition.
+  # Distribution will be uneven — the generator out-produces the other sources
+  # by an order of magnitude, so its partition runs hot. Accepted for now; the
+  # fix is re-keying on the parsed service name once the indexer exists.
+  key: "%{[container.name]}"
+  partition.hash:
+    reachable_only: false
+  required_acks: 1
+  compression: gzip
+  max_message_bytes: 1000000
 
 logging.level: info
