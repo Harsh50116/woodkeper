@@ -8,12 +8,22 @@ export type Level = "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL";
 
 export interface LogEntry {
   timestamp: string;
+  // What the log claims to be. For the generator this is the fake service name
+  // it emitted, which is why `source` is tracked separately.
   service: string;
+  // Which container actually produced the line.
+  source: string;
   level: Level;
   message: string;
+  // The original line, kept because parsing is lossy — anything a regex missed
+  // is otherwise unrecoverable without replaying Kafka.
+  raw: string;
   traceId?: string;
   metadata: Record<string, unknown>;
 }
+
+// The per-source parsers don't set `source` or `raw`; parse() adds them.
+type ParsedEntry = Omit<LogEntry, "source" | "raw">;
 
 // 192.168.65.1 - - [07/Aug/2026:00:48:18 +0000] "GET / HTTP/1.1" 200 896 "-" "curl/8.7.1" "-"
 const NGINX_ACCESS =
@@ -26,8 +36,13 @@ const NGINX_ERROR = /^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)$/;
 const POSTGRES =
   /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \w+) \[(\d+)\](?: \S+)? (\w+):\s+(.*)$/s;
 
-// nginx's own timestamp format: 07/Aug/2026:00:48:18 +0000
+// Our nginx.conf logs $msec — epoch seconds with milliseconds, e.g. 1754612345.123.
+// The stock combined format (07/Aug/2026:00:48:18 +0000) is still handled so the
+// parser survives an nginx running without our config.
 function parseNginxTime(raw: string): string {
+  if (/^\d+\.\d+$/.test(raw)) {
+    return new Date(Number(raw) * 1000).toISOString();
+  }
   const [date, time, offset] = [raw.slice(0, 11), raw.slice(12, 20), raw.slice(21)];
   const parsed = new Date(`${date.replace(/\//g, " ")} ${time} ${offset}`);
   return isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
@@ -59,7 +74,7 @@ function postgresLevel(severity: string): Level {
   }
 }
 
-function parseNginx(line: string, fallbackTime: string): LogEntry {
+function parseNginx(line: string, fallbackTime: string): ParsedEntry {
   const access = NGINX_ACCESS.exec(line);
   if (access) {
     const [, clientIp, user, time, method, path, protocol, status, bytes, referer, agent] = access;
@@ -98,7 +113,7 @@ function parseNginx(line: string, fallbackTime: string): LogEntry {
   return { timestamp: fallbackTime, service: "nginx", level: "INFO", message: line, metadata: {} };
 }
 
-function parsePostgres(line: string, fallbackTime: string): LogEntry {
+function parsePostgres(line: string, fallbackTime: string): ParsedEntry {
   const match = POSTGRES.exec(line);
   if (!match) {
     return {
@@ -131,7 +146,7 @@ function parsePostgres(line: string, fallbackTime: string): LogEntry {
 }
 
 // The generator already emits our target shape, so this is mostly validation.
-function parseGenerator(line: string, fallbackTime: string): LogEntry {
+function parseGenerator(line: string, fallbackTime: string): ParsedEntry {
   try {
     const parsed = JSON.parse(line);
     return {
@@ -154,7 +169,7 @@ function parseGenerator(line: string, fallbackTime: string): LogEntry {
   }
 }
 
-export function parse(source: string, line: string, fallbackTime: string): LogEntry {
+function parseBySource(source: string, line: string, fallbackTime: string): ParsedEntry {
   switch (source) {
     case "nginx":
       return parseNginx(line, fallbackTime);
@@ -165,4 +180,10 @@ export function parse(source: string, line: string, fallbackTime: string): LogEn
     default:
       return { timestamp: fallbackTime, service: source, level: "INFO", message: line, metadata: {} };
   }
+}
+
+export function parse(source: string, line: string, fallbackTime: string): LogEntry {
+  // source and raw are attached here rather than in each parser, so every entry
+  // carries them regardless of which format it came from.
+  return { ...parseBySource(source, line, fallbackTime), source, raw: line };
 }

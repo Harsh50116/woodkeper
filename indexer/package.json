@@ -6,7 +6,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@confluentinc/kafka-javascript": "^1.4.0"
+    "@confluentinc/kafka-javascript": "^1.4.0",
+    "@elastic/elasticsearch": "^8.19.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
