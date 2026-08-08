@@ -12,12 +12,24 @@ processors:
   - add_docker_metadata:
       host: "unix:///var/run/docker.sock"
 
-  # Filebeat reads its own container logs too, which with console output means
-  # it logs what it read, then reads what it logged.
+  # Allowlist: only real log sources are shipped. Everything else — Filebeat,
+  # Kafka, the indexer, and any infrastructure added later — is dropped.
+  #
+  # An allowlist rather than a denylist for two reasons: new infrastructure is
+  # excluded by default instead of needing a rule each time, and pipeline
+  # components must never be sources for themselves. The indexer especially:
+  # it would consume its own output, print it, and have it shipped back, a loop
+  # that amplifies with every pass.
   - drop_event:
       when:
-        equals:
-          container.name: "filebeat"
+        not:
+          or:
+            - equals:
+                container.name: "nginx"
+            - equals:
+                container.name: "postgres"
+            - equals:
+                container.name: "generator"
 
   # Beat-internal fields we don't need downstream. container.labels is dropped
   # because Docker Desktop attaches dozens of desktop_docker_io/* labels that
