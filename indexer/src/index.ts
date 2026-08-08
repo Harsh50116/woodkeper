@@ -2,6 +2,7 @@
 // Elasticsearch — this exists to prove the read side of the pipeline works.
 
 import { KafkaJS } from "@confluentinc/kafka-javascript";
+import { parse } from "./parsers.ts";
 
 const BROKERS = (process.env.KAFKA_BROKERS ?? "kafka:9092").split(",");
 const TOPIC = process.env.KAFKA_TOPIC ?? "logs";
@@ -35,7 +36,7 @@ async function main(): Promise<void> {
 
       // A malformed message must not kill the consumer — it would stall the
       // whole partition on one bad record.
-      let event: { container?: { name?: string }; message?: unknown };
+      let event: { container?: { name?: string }; message?: string; "@timestamp"?: string };
       try {
         event = JSON.parse(raw);
       } catch {
@@ -46,9 +47,11 @@ async function main(): Promise<void> {
       const source = event.container?.name ?? "unknown";
       seen.set(source, (seen.get(source) ?? 0) + 1);
 
-      console.log(
-        `p${partition}@${message.offset} ${source}: ${String(event.message).slice(0, 120)}`,
-      );
+      // Filebeat's own read time, used when a line carries no usable timestamp.
+      const fallbackTime = event["@timestamp"] ?? new Date().toISOString();
+      const entry = parse(source, event.message ?? "", fallbackTime);
+
+      console.log(JSON.stringify(entry));
 
       await consumer.commitOffsets([
         { topic: TOPIC, partition, offset: (Number(message.offset) + 1).toString() },

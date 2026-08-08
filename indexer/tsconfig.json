@@ -9,7 +9,10 @@
     // Node strips types at runtime rather than compiling, so it can only handle
     // erasable syntax — no enums, namespaces, or parameter properties.
     "erasableSyntaxOnly": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    // Node resolves imports at runtime without rewriting paths, so relative
+    // imports must carry the .ts extension.
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts"]
 }
