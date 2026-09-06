@@ -1,0 +1,153 @@
+services:
+  nginx:
+    image: nginx:1.27
+    container_name: nginx
+    ports:
+      - "8080:80"
+    volumes:
+      # Custom log_format with millisecond timestamps.
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: pass
+    # Postgres logs almost nothing by default. log_min_duration_statement=0 logs
+    # every statement together with its duration on one line. log_statement=all
+    # is deliberately NOT set: it logs the statement separately, which splits one
+    # query across two log lines that can never be recombined downstream.
+    command:
+      - -c
+      - log_min_duration_statement=0
+
+  generator:
+    image: node:24-slim
+    container_name: generator
+    working_dir: /app
+    volumes:
+      - ./generator:/app:ro
+    command: node generator.ts
+    environment:
+      TRACES_PER_SEC: 5
+      BURST_INTERVAL_MS: 120000
+      BURST_DURATION_MS: 10000
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: kafka
+    ports:
+      # Host-facing port. Containers use kafka:9092 instead.
+      - "29092:29092"
+    environment:
+      # KRaft: this node is both broker and controller, so there is no ZooKeeper.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # Two doors to the same broker: clients are told which address to use, so
+      # the advertised host must match how the client reaches us.
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      # Single broker, so nothing can be replicated.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly so we control partition counts.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # One-shot: creates the topic, then exits.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    command: >
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+      --create --if-not-exists --topic logs
+      --partitions 3 --replication-factor 1
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.17.0
+    container_name: filebeat
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # Needs root to read Docker's container log files.
+    user: root
+    # strict.perms is disabled because the mounted config is owned by the host user.
+    command: filebeat -e --strict.perms=false
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The registry tracks how far each file has been read. Without a volume it
+      # is lost when the container is recreated, and every log is re-shipped.
+      - filebeat-data:/usr/share/filebeat/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      # Single node, so no cluster formation or replicas.
+      discovery.type: single-node
+      # Security off: this is a local learning stack, and enabling it would mean
+      # certificates and credentials in every client.
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+
+  indexer:
+    build: ./indexer
+    container_name: indexer
+    depends_on:
+      # Waits for the topic to exist, not just for the broker to be up —
+      # auto-create is disabled, so subscribing early fails.
+      kafka-init:
+        condition: service_completed_successfully
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: logs
+      KAFKA_GROUP_ID: indexer
+      ES_NODE: http://elasticsearch:9200
+      ES_INDEX_PREFIX: logs
+      BATCH_SIZE: 500
+
+volumes:
+  filebeat-data:
+  es-data:

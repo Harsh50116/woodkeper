@@ -1,0 +1,55 @@
+# Reads Docker's container logs, enriches them with container metadata, and
+# ships them to Kafka. Parsing is deliberately left to the indexer.
+
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+
+processors:
+  # Attaches container name, image and labels — without this every line is
+  # anonymous and we can't tell nginx from postgres.
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+
+  # Allowlist: only real log sources are shipped. Everything else — Filebeat,
+  # Kafka, the indexer, and any infrastructure added later — is dropped.
+  #
+  # An allowlist rather than a denylist for two reasons: new infrastructure is
+  # excluded by default instead of needing a rule each time, and pipeline
+  # components must never be sources for themselves. The indexer especially:
+  # it would consume its own output, print it, and have it shipped back, a loop
+  # that amplifies with every pass.
+  - drop_event:
+      when:
+        not:
+          or:
+            - equals:
+                container.name: "nginx"
+            - equals:
+                container.name: "postgres"
+            - equals:
+                container.name: "generator"
+
+  # Beat-internal fields we don't need downstream. container.labels is dropped
+  # because Docker Desktop attaches dozens of desktop_docker_io/* labels that
+  # would otherwise triple the size of every event.
+  - drop_fields:
+      fields: ["agent", "ecs", "input", "log.offset", "container.labels", "host"]
+      ignore_missing: true
+
+output.kafka:
+  hosts: ["kafka:9092"]
+  topic: "logs"
+  # Keyed by container name, with Kafka hashing the key to pick a partition.
+  # Distribution will be uneven — the generator out-produces the other sources
+  # by an order of magnitude, so its partition runs hot. Accepted for now; the
+  # fix is re-keying on the parsed service name once the indexer exists.
+  key: "%{[container.name]}"
+  partition.hash:
+    reachable_only: false
+  required_acks: 1
+  compression: gzip
+  max_message_bytes: 1000000
+
+logging.level: info
